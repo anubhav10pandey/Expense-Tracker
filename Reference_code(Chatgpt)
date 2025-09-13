@@ -1,0 +1,73 @@
+def load_expenses(filename):
+    expenses = []
+    try:
+        with open(filename, 'r') as file:
+            for line in file:
+                parts = line.strip().split('|')
+                if len(parts) == 3:
+                    date, category, amount = parts
+                    expenses.append({
+                        'date': date,
+                        'category': category,
+                        'amount': float(amount)
+                    })
+    except FileNotFoundError:
+        # If file doesn't exist, just return empty list
+        pass
+    return expenses
+
+def save_expenses(filename, expenses):
+    with open(filename, 'w') as file:
+        for e in expenses:
+            file.write(f"{e['date']}|{e['category']}|{e['amount']}\n")
+
+def add_expense(expenses):
+    date = input("Enter date (YYYY-MM-DD): ")
+    category = input("Enter category: ")
+    try:
+        amount = float(input("Enter amount: "))
+        expenses.append({'date': date, 'category': category, 'amount': amount})
+        print("✅ Expense added.")
+    except ValueError:
+        print("❌ Invalid amount entered.")
+
+def view_expenses(expenses):
+    if not expenses:
+        print("⚠️ No expenses found.")
+        return
+    print("\n--- Expenses ---")
+    for e in expenses:
+        print(f"{e['date']} | {e['category']} | ${e['amount']:.2f}")
+    print("----------------")
+
+def view_total(expenses):
+    total = sum(e['amount'] for e in expenses)
+    print(f"\n💰 Total Spent: ${total:.2f}")
+
+def main():
+    FILENAME = 'expenses.txt'
+    expenses = load_expenses(FILENAME)
+
+    while True:
+        print("\n===== Expense Tracker =====")
+        print("1. Add Expense")
+        print("2. View Expenses")
+        print("3. View Total")
+        print("4. Exit")
+        choice = input("Choose an option (1-4): ")
+
+        if choice == '1':
+            add_expense(expenses)
+        elif choice == '2':
+            view_expenses(expenses)
+        elif choice == '3':
+            view_total(expenses)
+        elif choice == '4':
+            save_expenses(FILENAME, expenses)
+            print("✅ Expenses saved. Goodbye!")
+            break
+        else:
+            print("❌ Invalid choice. Try again.")
+
+if __name__ == "__main__":
+    main()
