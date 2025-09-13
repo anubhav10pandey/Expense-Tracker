@@ -1,3 +1,14 @@
 Start
  \/
+Make a dictionary to store data such as "Expense_sheet"
+ \/
+Give input data(Personal info)
+ \/
+store the input(in list)
+ \/
+add the list to the "Expense_sheet"
+ \/
+Now use the input to give variable to "Expense_sheet_graph"
+ \/
 Stop
+
