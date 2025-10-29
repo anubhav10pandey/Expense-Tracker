@@ -1,0 +1,1464 @@
+import sqlite3
+import customtkinter as ctk
+from tkinter import ttk, filedialog
+from tkinter.messagebox import showinfo, showerror, askyesno
+from datetime import datetime, timedelta
+from collections import defaultdict, Counter
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import re
+import random
+import csv # <-- ADDED IMPORT
+from tkcalendar import Calendar 
+
+# --- Database setup ---
+DB_NAME = 'expenses.db'
+
+def insert_sample_data(conn, cursor):
+    """Inserts sample data for the next 3 months if expenses table is empty."""
+    try:
+        print("Inserting sample data...")
+        sample_expenses = [
+            # November 2025
+            ('2025-11-01', 'Bills', 4500.00, 'Electricity Bill'),
+            ('2025-11-03', 'Food', 850.50, 'Groceries'),
+            ('2025-11-05', 'Transport', 300.00, 'Auto rickshaw'),
+            ('2025-11-07', 'Shopping', 2200.00, 'New clothes'),
+            ('2025-11-10', 'Entertainment', 750.00, 'Movie tickets'),
+            ('2025-11-12', 'Food', 1200.00, 'Dinner out'),
+            ('2025-11-15', 'Health', 500.00, 'Medicines'),
+            ('2025-11-18', 'Transport', 150.00, 'Bus fare'),
+            ('2025-11-20', 'Food', 900.00, 'Weekly groceries'),
+            ('2025-11-22', 'Other', 1000.00, 'Gift'),
+            ('2025-11-25', 'Shopping', 1800.00, 'Diwali shopping'),
+            ('2025-11-28', 'Bills', 800.00, 'Internet Bill'),
+            ('2025-11-30', 'Food', 450.00, 'Lunch'),
+
+            # December 2025
+            ('2025-12-01', 'Bills', 4600.00, 'Electricity Bill'),
+            ('2025-12-03', 'Food', 950.00, 'Groceries'),
+            ('2025-12-05', 'Transport', 350.00, 'Cab to office'),
+            ('2025-12-07', 'Shopping', 3000.00, 'Christmas gifts'),
+            ('2025-12-10', 'Entertainment', 1500.00, 'Concert'),
+            ('2025-12-12', 'Food', 1800.00, 'Team lunch'),
+            ('2025-12-15', 'Health', 300.00, 'Cold medicine'),
+            ('2025-12-18', 'Transport', 200.00, 'Metro card recharge'),
+            ('2025-12-20', 'Food', 1100.00, 'Weekly groceries'),
+            ('2025-12-24', 'Shopping', 2500.00, 'New Year party dress'),
+            ('2025-12-25', 'Food', 3500.00, 'Christmas dinner'),
+            ('2025-12-28', 'Bills', 800.00, 'Internet Bill'),
+            ('2025-12-31', 'Entertainment', 5000.00, 'New Year Eve party'),
+
+            # January 2026
+            ('2026-01-01', 'Bills', 4700.00, 'Electricity Bill'),
+            ('2026-01-03', 'Food', 1000.00, 'Groceries'),
+            ('2026-01-05', 'Transport', 300.00, 'Auto fare'),
+            ('2026-01-07', 'Shopping', 1500.00, 'Books'),
+            ('2026-01-10', 'Health', 2000.00, 'Dental checkup'),
+            ('2026-01-12', 'Food', 600.00, 'Swiggy order'),
+            ('2026-01-15', 'Bills', 1200.00, 'Phone Bill'),
+            ('2026-01-18', 'Transport', 150.00, 'Bus fare'),
+            ('2026-01-20', 'Food', 950.00, 'Weekly groceries'),
+            ('2026-01-23', 'Entertainment', 800.00, 'Movie'),
+            ('2026-01-26', 'Shopping', 2200.00, 'Republic Day sale'),
+            ('2026-01-28', 'Bills', 800.00, 'Internet Bill'),
+            ('2026-01-30', 'Food', 700.00, 'Dinner'),
+        ]
+        
+        cursor.executemany("INSERT INTO expenses (date, category, amount, description) VALUES (?, ?, ?, ?)", sample_expenses)
+        conn.commit()
+    except sqlite3.Error as e:
+        # Using print for non-blocking error in case showerror fails during init
+        print(f"Error inserting sample data: {e}") 
+
+def init_db():
+    """Initializes the SQLite database and creates tables."""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        
+        # Expenses table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS expenses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            category TEXT NOT NULL,
+            amount REAL NOT NULL,
+            description TEXT
+        )
+        ''')
+        
+        # Categories table
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS categories (
+            name TEXT PRIMARY KEY NOT NULL
+        )
+        ''')
+        
+        # --- NEW: Budgets table ---
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS budgets (
+            category TEXT PRIMARY KEY NOT NULL,
+            amount REAL NOT NULL
+        )
+        ''')
+        
+        # Check if categories are empty, and if so, add defaults
+        cursor.execute("SELECT COUNT(*) FROM categories")
+        if cursor.fetchone()[0] == 0:
+            default_categories = ['Food', 'Transport', 'Shopping', 'Bills', 'Entertainment', 'Health', 'Other']
+            cursor.executemany("INSERT INTO categories (name) VALUES (?)", [(cat,) for cat in default_categories])
+
+        # Check if expenses are empty, and if so, add sample data
+        cursor.execute("SELECT COUNT(*) FROM expenses")
+        if cursor.fetchone()[0] == 0:
+            insert_sample_data(conn, cursor)
+
+        conn.commit()
+    except sqlite3.Error as e:
+        showerror("Database Error", f"Failed to initialize database: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+# --- Main Application Class ---
+class ExpenseTrackerApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+
+        # --- Window Setup ---
+        self.title("Personal Expense Tracker v8 (Budgets & Reports)")
+        self.geometry("1400x900") # Increased height for new chart
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
+
+        # --- Custom Colors for Charts ---
+        self.PIE_COLORS = [
+            '#FF6347', '#4682B4', '#8A2BE2', '#3CB371', '#FFD700', 
+            '#FF69B4', '#BA55D3', '#7B68EE', '#00CED1', '#FFA07A',
+            '#ADFF2F', '#F08080', '#20B2AA', '#C71585', '#CD853F'
+        ]
+
+        # --- Database Connection ---
+        try:
+            self.conn = sqlite3.connect(DB_NAME)
+            self.cursor = self.conn.cursor()
+        except sqlite3.Error as e:
+            showerror("Database Error", f"Failed to connect to database: {e}")
+            self.destroy()
+            return
+
+        self.categories = []
+        self.load_categories_from_db() # Load categories into self.categories
+        
+        self.selected_expense_id = None # To store ID for editing
+
+        # --- Layout ---
+        self.grid_columnconfigure(0, weight=1, minsize=400) # Left frame
+        self.grid_columnconfigure(1, weight=3) # Right frame
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=0) # Status bar row
+
+        # --- Left Frame (Tabs for Actions) ---
+        self.left_tab_view = ctk.CTkTabview(self, corner_radius=10)
+        self.left_tab_view.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
+
+        self.add_tab = self.left_tab_view.add("➕ Add Expense")
+        self.filter_edit_tab = self.left_tab_view.add("🔍 Filter & Edit")
+        self.manage_tab = self.left_tab_view.add("💰 Manage") # Renamed from Settings
+        self.ai_tab = self.left_tab_view.add("✨ AI & Reports") # Renamed from AI Insights
+        
+        self.left_tab_view.set("➕ Add Expense")
+
+        # --- 1. Add Expense Tab ---
+        self.add_frame = ctk.CTkFrame(self.add_tab, fg_color="transparent")
+        self.add_frame.pack(expand=True, fill="both", padx=10, pady=10)
+        self.add_frame.grid_columnconfigure(0, weight=1)
+
+        self.add_label = ctk.CTkLabel(self.add_frame, text="Add New Expense", font=ctk.CTkFont(size=20, weight="bold"))
+        self.add_label.grid(row=0, column=0, columnspan=3, padx=10, pady=10)
+
+        # Date Entry Frame with Calendar Picker
+        self.add_date_frame = ctk.CTkFrame(self.add_frame, fg_color="transparent")
+        self.add_date_frame.grid(row=1, column=0, padx=0, pady=10, sticky="ew")
+        self.add_date_frame.grid_columnconfigure(0, weight=1)
+
+        self.add_date_entry = ctk.CTkEntry(self.add_date_frame, placeholder_text="Date (YYYY-MM-DD)")
+        self.add_date_entry.grid(row=0, column=0, padx=(10,5), pady=0, sticky="ew")
+
+        self.add_cal_button = ctk.CTkButton(self.add_date_frame, text="🗓️", command=lambda: self._pick_date(self.add_date_entry), width=40)
+        self.add_cal_button.grid(row=0, column=1, padx=(0,10), pady=0)
+        
+        self.today_button = ctk.CTkButton(self.add_frame, text="🗓️ Today", command=self.set_add_date_today, width=80)
+        self.today_button.grid(row=1, column=1, columnspan=2, padx=10, pady=10, sticky="w")
+        
+        self._set_date_entry(self.add_date_entry, datetime.now().strftime('%Y-%m-%d')) # Set today's date and make readonly
+
+        self.add_amount_entry = ctk.CTkEntry(self.add_frame, placeholder_text="Amount (Rs.)")
+        self.add_amount_entry.grid(row=2, column=0, padx=10, pady=10, sticky="ew")
+
+        self.add_category_menu = ctk.CTkOptionMenu(self.add_frame, values=self.categories)
+        self.add_category_menu.grid(row=2, column=1, columnspan=2, padx=10, pady=10, sticky="ew")
+
+        self.add_description_entry = ctk.CTkEntry(self.add_frame, placeholder_text="Description")
+        self.add_description_entry.grid(row=3, column=0, padx=10, pady=10, sticky="ew")
+        
+        self.suggest_button = ctk.CTkButton(self.add_frame, text="💡 Suggest", command=self.suggest_category, width=80,
+                                            fg_color="#8A2BE2", hover_color="#7B68EE")
+        self.suggest_button.grid(row=3, column=1, columnspan=2, padx=10, pady=10, sticky="w")
+
+        self.add_button = ctk.CTkButton(self.add_frame, text="➕ Add Expense", command=self.add_expense,
+                                        fg_color="#28A745", hover_color="#218838")
+        self.add_button.grid(row=4, column=0, columnspan=3, padx=10, pady=20, sticky="ew")
+
+        # --- 2. Filter & Edit Tab ---
+        self.filter_edit_tab.grid_columnconfigure(0, weight=1)
+        self.filter_edit_tab.grid_rowconfigure(1, weight=1) # Let the content frame take space
+        
+        self.filter_edit_segmented_button = ctk.CTkSegmentedButton(
+            self.filter_edit_tab, 
+            values=["🔍 Filter", "✏️ Edit"],
+            command=self._switch_filter_edit_frame
+        )
+        self.filter_edit_segmented_button.grid(row=0, column=0, padx=10, pady=10, sticky="new")
+        
+        # 2a. Filter Frame
+        self.filter_frame = ctk.CTkFrame(self.filter_edit_tab, fg_color="transparent")
+        self.filter_frame.grid(row=1, column=0, padx=0, pady=0, sticky="nsew") # Start visible
+        self.filter_frame.grid_columnconfigure((0, 1), weight=1)
+
+        self.filter_label = ctk.CTkLabel(self.filter_frame, text="Filter Expenses", font=ctk.CTkFont(size=20, weight="bold"))
+        self.filter_label.grid(row=0, column=0, columnspan=2, padx=10, pady=10)
+        
+        self.filter_cat_menu = ctk.CTkOptionMenu(self.filter_frame, values=["All Categories"] + self.categories)
+        self.filter_cat_menu.grid(row=1, column=0, columnspan=2, padx=10, pady=10, sticky="ew")
+
+        self.start_date_frame = ctk.CTkFrame(self.filter_frame, fg_color="transparent")
+        self.start_date_frame.grid(row=2, column=0, padx=(10,5), pady=5, sticky="ew")
+        self.start_date_frame.grid_columnconfigure(0, weight=1)
+        self.start_date_entry = ctk.CTkEntry(self.start_date_frame, placeholder_text="Start Date")
+        self.start_date_entry.grid(row=0, column=0, sticky="ew")
+        self.start_cal_button = ctk.CTkButton(self.start_date_frame, text="🗓️", command=lambda: self._pick_date(self.start_date_entry), width=30)
+        self.start_cal_button.grid(row=0, column=1, padx=(5,0))
+        self.start_date_entry.configure(state='readonly')
+        
+        self.end_date_frame = ctk.CTkFrame(self.filter_frame, fg_color="transparent")
+        self.end_date_frame.grid(row=2, column=1, padx=(5,10), pady=5, sticky="ew")
+        self.end_date_frame.grid_columnconfigure(0, weight=1)
+        self.end_date_entry = ctk.CTkEntry(self.end_date_frame, placeholder_text="End Date")
+        self.end_date_entry.grid(row=0, column=0, sticky="ew")
+        self.end_cal_button = ctk.CTkButton(self.end_date_frame, text="🗓️", command=lambda: self._pick_date(self.end_date_entry), width=30)
+        self.end_cal_button.grid(row=0, column=1, padx=(5,0))
+        self.end_date_entry.configure(state='readonly')
+
+        self.filter_button = ctk.CTkButton(self.filter_frame, text="🔍 Apply Filter", command=self.load_expenses)
+        self.filter_button.grid(row=3, column=0, padx=10, pady=10, sticky="ew")
+        
+        self.clear_filter_button = ctk.CTkButton(self.filter_frame, text="❌ Clear Filter", command=self.clear_filters, fg_color="gray")
+        self.clear_filter_button.grid(row=3, column=1, padx=10, pady=10, sticky="ew")
+        
+        # 2b. Edit Frame
+        self.edit_frame = ctk.CTkFrame(self.filter_edit_tab, fg_color="transparent")
+        self.edit_frame.grid(row=1, column=0, padx=0, pady=0, sticky="nsew") # Start hidden
+        self.edit_frame.grid_columnconfigure((0, 1), weight=1)
+        
+        self.edit_label = ctk.CTkLabel(self.edit_frame, text="Edit Selected Expense", font=ctk.CTkFont(size=20, weight="bold"))
+        self.edit_label.grid(row=0, column=0, columnspan=2, padx=10, pady=10)
+        
+        self.edit_info_label = ctk.CTkLabel(self.edit_frame, text="Select an item from the list to edit", font=ctk.CTkFont(size=12, slant="italic"), text_color="gray")
+        self.edit_info_label.grid(row=1, column=0, columnspan=2, padx=10, pady=(0, 10))
+
+        self.edit_date_frame = ctk.CTkFrame(self.edit_frame, fg_color="transparent")
+        self.edit_date_frame.grid(row=2, column=0, padx=(10,5), pady=10, sticky="ew")
+        self.edit_date_frame.grid_columnconfigure(0, weight=1)
+        self.edit_date_entry = ctk.CTkEntry(self.edit_date_frame, placeholder_text="Date")
+        self.edit_date_entry.grid(row=0, column=0, sticky="ew")
+        self.edit_cal_button = ctk.CTkButton(self.edit_date_frame, text="🗓️", command=lambda: self._pick_date(self.edit_date_entry), width=30)
+        self.edit_cal_button.grid(row=0, column=1, padx=(5,0))
+        self.edit_date_entry.configure(state='readonly')
+
+        self.edit_amount_entry = ctk.CTkEntry(self.edit_frame, placeholder_text="Amount (Rs.)")
+        self.edit_amount_entry.grid(row=2, column=1, padx=(5,10), pady=10, sticky="ew")
+
+        self.edit_category_menu = ctk.CTkOptionMenu(self.edit_frame, values=self.categories)
+        self.edit_category_menu.grid(row=3, column=0, padx=(10,5), pady=10, sticky="ew")
+        
+        self.edit_description_entry = ctk.CTkEntry(self.edit_frame, placeholder_text="Description")
+        self.edit_description_entry.grid(row=3, column=1, padx=(5,10), pady=10, sticky="ew")
+
+        self.save_button = ctk.CTkButton(self.edit_frame, text="💾 Save Changes", command=self.update_expense,
+                                         fg_color="#28A745", hover_color="#218838")
+        self.save_button.grid(row=4, column=0, padx=10, pady=15, sticky="ew")
+        
+        self.clear_edit_button = ctk.CTkButton(self.edit_frame, text="❌ Clear Form", command=self.clear_edit_form, fg_color="gray")
+        self.clear_edit_button.grid(row=4, column=1, padx=10, pady=15, sticky="ew")
+
+        self.delete_button = ctk.CTkButton(self.filter_edit_tab, text="🗑️ Delete Selected Expense", command=self.delete_expense, fg_color="#D32F2F", hover_color="#B71C1C")
+        self.delete_button.grid(row=2, column=0, padx=10, pady=10, sticky="ew")
+        
+        self.edit_frame.grid_remove() # Hide edit frame initially
+        self.delete_button.grid_remove() # Hide delete button initially
+        self.filter_edit_segmented_button.set("🔍 Filter") # Set default segment
+
+        # --- 3. Manage Tab (Old Settings) ---
+        self.manage_tab.grid_columnconfigure(0, weight=1)
+        
+        # --- 3a. Category Management ---
+        self.cat_manage_frame = ctk.CTkFrame(self.manage_tab)
+        self.cat_manage_frame.grid(row=0, column=0, padx=10, pady=10, sticky="new")
+        self.cat_manage_frame.grid_columnconfigure(0, weight=1)
+        self.cat_manage_frame.grid_columnconfigure(1, weight=1)
+        
+        self.cat_label = ctk.CTkLabel(self.cat_manage_frame, text="Manage Categories", font=ctk.CTkFont(size=20, weight="bold"))
+        self.cat_label.grid(row=0, column=0, columnspan=2, padx=10, pady=10)
+
+        self.new_cat_entry = ctk.CTkEntry(self.cat_manage_frame, placeholder_text="New Category Name")
+        self.new_cat_entry.grid(row=1, column=0, padx=10, pady=10, sticky="ew")
+        
+        self.add_cat_button = ctk.CTkButton(self.cat_manage_frame, text="➕ Add Category", command=self.add_category)
+        self.add_cat_button.grid(row=1, column=1, padx=10, pady=10, sticky="ew")
+        
+        self.delete_cat_menu = ctk.CTkOptionMenu(self.cat_manage_frame, values=self.categories)
+        self.delete_cat_menu.grid(row=2, column=0, padx=10, pady=10, sticky="ew")
+        
+        self.delete_cat_button = ctk.CTkButton(self.cat_manage_frame, text="🗑️ Delete Category", command=self.delete_category, fg_color="#D32F2F", hover_color="#B71C1C")
+        self.delete_cat_button.grid(row=2, column=1, padx=10, pady=10, sticky="ew")
+        
+        # --- 3b. NEW: Budget Management ---
+        self.budget_manage_frame = ctk.CTkFrame(self.manage_tab)
+        self.budget_manage_frame.grid(row=1, column=0, padx=10, pady=20, sticky="new")
+        self.budget_manage_frame.grid_columnconfigure(0, weight=1)
+        self.budget_manage_frame.grid_columnconfigure(1, weight=1)
+
+        self.budget_label = ctk.CTkLabel(self.budget_manage_frame, text="Manage Budgets", font=ctk.CTkFont(size=20, weight="bold"))
+        self.budget_label.grid(row=0, column=0, columnspan=2, padx=10, pady=10)
+        
+        self.budget_cat_menu = ctk.CTkOptionMenu(self.budget_manage_frame, values=self.categories)
+        self.budget_cat_menu.grid(row=1, column=0, padx=10, pady=10, sticky="ew")
+        
+        self.budget_amount_entry = ctk.CTkEntry(self.budget_manage_frame, placeholder_text="Budget Amount (Rs.)")
+        self.budget_amount_entry.grid(row=1, column=1, padx=10, pady=10, sticky="ew")
+        
+        self.set_budget_button = ctk.CTkButton(self.budget_manage_frame, text="💾 Set Budget", command=self.set_budget)
+        self.set_budget_button.grid(row=2, column=0, columnspan=2, padx=10, pady=10, sticky="ew")
+
+        # --- 3c. NEW: App Settings (Theme) ---
+        self.app_settings_frame = ctk.CTkFrame(self.manage_tab)
+        self.app_settings_frame.grid(row=2, column=0, padx=10, pady=10, sticky="new")
+        self.app_settings_frame.grid_columnconfigure(1, weight=1)
+
+        self.theme_label = ctk.CTkLabel(self.app_settings_frame, text="App Theme", font=ctk.CTkFont(size=16, weight="bold"))
+        self.theme_label.grid(row=0, column=0, padx=10, pady=10, sticky="w")
+        
+        self.theme_switch = ctk.CTkSwitch(self.app_settings_frame, text="☀️ / 🌙", command=self._toggle_theme, onvalue="dark", offvalue="light")
+        self.theme_switch.grid(row=0, column=1, padx=10, pady=10, sticky="e")
+        self.theme_switch.select() # Default to dark
+        
+        # --- 4. AI & Reports Tab (Old AI Insights) ---
+        self.ai_tab.grid_columnconfigure(0, weight=1)
+        
+        # --- 4a. AI Predictor ---
+        self.ai_frame = ctk.CTkFrame(self.ai_tab)
+        self.ai_frame.grid(row=0, column=0, padx=10, pady=10, sticky="new")
+        self.ai_frame.grid_columnconfigure(0, weight=1)
+
+        self.ai_label = ctk.CTkLabel(self.ai_frame, text="AI Spending Predictor", font=ctk.CTkFont(size=20, weight="bold"))
+        self.ai_label.grid(row=0, column=0, columnspan=2, padx=10, pady=10)
+        
+        self.ai_desc_label = ctk.CTkLabel(self.ai_frame, text="Uses Linear Regression on past monthly data\nto forecast your next month's total spending.\n(Requires at least 3 months of data)",
+                                          font=ctk.CTkFont(size=12, slant="italic"), text_color="gray")
+        self.ai_desc_label.grid(row=1, column=0, columnspan=2, padx=10, pady=(0, 15))
+
+        self.predict_button = ctk.CTkButton(self.ai_frame, text="🔮 Predict Next Month's Spending", command=self.predict_spending,
+                                            fg_color="#8A2BE2", hover_color="#7B68EE")
+        self.predict_button.grid(row=2, column=0, columnspan=2, padx=10, pady=10, sticky="ew")
+        
+        self.prediction_result_label = ctk.CTkLabel(self.ai_frame, text="Prediction: Rs. 0.00", font=ctk.CTkFont(size=24, weight="bold"), text_color="#3484F0")
+        self.prediction_result_label.grid(row=3, column=0, columnspan=2, padx=10, pady=20)
+        self.prediction_result_label.configure(text="") # Hide on start
+
+        # --- 4b. NEW: Reports & Export ---
+        self.report_frame = ctk.CTkFrame(self.ai_tab)
+        self.report_frame.grid(row=1, column=0, padx=10, pady=20, sticky="new")
+        self.report_frame.grid_columnconfigure(0, weight=1)
+        
+        self.report_label = ctk.CTkLabel(self.report_frame, text="Reports & Export", font=ctk.CTkFont(size=20, weight="bold"))
+        self.report_label.grid(row=0, column=0, columnspan=3, padx=10, pady=10)
+        
+        # Monthly Report
+        self.month_menu = ctk.CTkOptionMenu(self.report_frame, values=[f"{i:02d}" for i in range(1, 13)])
+        self.month_menu.set(datetime.now().strftime("%m"))
+        self.month_menu.grid(row=1, column=0, padx=10, pady=10, sticky="ew")
+        
+        # Get year range from data
+        try:
+            self.cursor.execute("SELECT strftime('%Y', date) FROM expenses GROUP BY strftime('%Y', date) ORDER BY strftime('%Y', date) ASC")
+            years = [row[0] for row in self.cursor.fetchall()]
+            if not years:
+                years = [datetime.now().strftime('%Y')]
+        except:
+            years = [datetime.now().strftime('%Y')]
+            
+        self.year_menu = ctk.CTkOptionMenu(self.report_frame, values=years)
+        self.year_menu.set(datetime.now().strftime("%Y"))
+        self.year_menu.grid(row=1, column=1, padx=10, pady=10, sticky="ew")
+        
+        self.report_button = ctk.CTkButton(self.report_frame, text="📄 Generate Report", command=self.generate_monthly_report)
+        self.report_button.grid(row=1, column=2, padx=10, pady=10, sticky="ew")
+
+        # Export Button
+        self.export_button = ctk.CTkButton(self.report_frame, text="📤 Export to CSV", command=self.export_to_csv,
+                                           fg_color="#007BFF", hover_color="#0056b3")
+        self.export_button.grid(row=2, column=0, columnspan=3, padx=10, pady=10, sticky="ew")
+
+        # --- Right Frame (Tabs for Data) ---
+        self.right_tab_view = ctk.CTkTabview(self, corner_radius=10)
+        self.right_tab_view.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
+
+        self.list_tab = self.right_tab_view.add("📋 Expense List")
+        self.dash_tab = self.right_tab_view.add("📊 Dashboard")
+        self.budget_tab = self.right_tab_view.add("📈 Budgets") # <-- NEW TAB
+        
+        self.right_tab_view.set("📋 Expense List")
+
+        # --- 4. Expense List Tab ---
+        self.list_tab.grid_rowconfigure(0, weight=1)
+        self.list_tab.grid_columnconfigure(0, weight=1)
+        
+        self.tree_frame = ctk.CTkFrame(self.list_tab, fg_color="transparent")
+        self.tree_frame.pack(expand=True, fill="both", padx=5, pady=5)
+        self.tree_frame.grid_rowconfigure(0, weight=1)
+        self.tree_frame.grid_columnconfigure(0, weight=1)
+
+        # Style Treeview
+        style = ttk.Style()
+        style.theme_use("default")
+        style.configure("Treeview", background="#2a2d2e", foreground="white", rowheight=25, fieldbackground="#343638", bordercolor="#343638", borderwidth=0)
+        style.map('Treeview', background=[('selected', '#22559b')])
+        style.configure("Treeview.Heading", background="#565b5e", foreground="white", relief="flat", font=('CTkFont', 10, 'bold'))
+        style.map("Treeview.Heading", background=[('active', '#3484F0')])
+
+        self.tree = ttk.Treeview(self.tree_frame, columns=("ID", "Date", "Category", "Amount", "Description"), show="headings")
+        self.tree.heading("ID", text="ID")
+        self.tree.heading("Date", text="Date")
+        self.tree.heading("Category", text="Category")
+        self.tree.heading("Amount", text="Amount (Rs.)")
+        self.tree.heading("Description", text="Description")
+
+        self.tree.column("ID", width=50, anchor="center")
+        self.tree.column("Date", width=100, anchor="center")
+        self.tree.column("Category", width=120, anchor="center")
+        self.tree.column("Amount", width=100, anchor="e")
+        self.tree.column("Description", width=300)
+
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        
+        scrollbar = ctk.CTkScrollbar(self.tree_frame, command=self.tree.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        
+        # Bind tree selection event
+        self.tree.bind('<<TreeviewSelect>>', self.on_tree_select)
+
+        # --- 5. Dashboard Tab ---
+        # Re-configure grid for 2x2 layout: Row 0 KPIs, Row 1 Charts
+        self.dash_tab.grid_rowconfigure(0, weight=0) # KPI row
+        self.dash_tab.grid_rowconfigure(1, weight=1) # Charts row
+        self.dash_tab.grid_columnconfigure(0, weight=1)
+
+        # --- KPI Summary Frame ---
+        self.kpi_frame = ctk.CTkFrame(self.dash_tab)
+        self.kpi_frame.grid(row=0, column=0, columnspan=2, padx=10, pady=10, sticky="new")
+        self.kpi_frame.grid_columnconfigure((0, 1, 2, 3), weight=1) # 4 KPI cards
+
+        # Card 1: Total Spent
+        self.card_total = ctk.CTkFrame(self.kpi_frame, fg_color="#343638", corner_radius=10)
+        self.card_total.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+        self.card_total_title = ctk.CTkLabel(self.card_total, text="TOTAL SPENT", font=ctk.CTkFont(size=12, weight="bold"), text_color="gray")
+        self.card_total_title.pack(pady=(15, 5))
+        self.kpi_total_label = ctk.CTkLabel(self.card_total, text="Rs. 0.00", font=ctk.CTkFont(size=28, weight="bold"), text_color="#3484F0")
+        self.kpi_total_label.pack(pady=(0, 20))
+
+        # Card 2: Total Transactions
+        self.card_count = ctk.CTkFrame(self.kpi_frame, fg_color="#343638", corner_radius=10)
+        self.card_count.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+        self.card_count_title = ctk.CTkLabel(self.card_count, text="TRANSACTIONS", font=ctk.CTkFont(size=12, weight="bold"), text_color="gray")
+        self.card_count_title.pack(pady=(15, 5))
+        self.kpi_count_label = ctk.CTkLabel(self.card_count, text="0", font=ctk.CTkFont(size=28, weight="bold"))
+        self.kpi_count_label.pack(pady=(0, 20))
+
+        # Card 3: Average Expense
+        self.card_avg = ctk.CTkFrame(self.kpi_frame, fg_color="#343638", corner_radius=10)
+        self.card_avg.grid(row=0, column=2, padx=10, pady=10, sticky="nsew")
+        self.kpi_avg_title = ctk.CTkLabel(self.card_avg, text="AVERAGE SPENT", font=ctk.CTkFont(size=12, weight="bold"), text_color="gray")
+        self.kpi_avg_title.pack(pady=(15, 5))
+        self.kpi_avg_label = ctk.CTkLabel(self.card_avg, text="Rs. 0.00", font=ctk.CTkFont(size=28, weight="bold"))
+        self.kpi_avg_label.pack(pady=(0, 20))
+        
+        # Card 4: Highest Expense
+        self.card_high = ctk.CTkFrame(self.kpi_frame, fg_color="#343638", corner_radius=10)
+        self.card_high.grid(row=0, column=3, padx=10, pady=10, sticky="nsew")
+        self.card_high_title = ctk.CTkLabel(self.card_high, text="HIGHEST EXPENSE", font=ctk.CTkFont(size=12, weight="bold"), text_color="gray")
+        self.card_high_title.pack(pady=(15, 5))
+        self.kpi_high_label = ctk.CTkLabel(self.card_high, text="Rs. 0.00 (N/A)", font=ctk.CTkFont(size=20, weight="bold"), text_color="#FF6347")
+        self.kpi_high_label.pack(pady=(0, 20), padx=5)
+
+        # --- Charts Frame (to hold all charts in a 2x2 grid) ---
+        self.charts_frame = ctk.CTkFrame(self.dash_tab, fg_color="transparent")
+        self.charts_frame.grid(row=1, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
+        self.charts_frame.grid_columnconfigure(0, weight=1)
+        self.charts_frame.grid_columnconfigure(1, weight=1)
+        self.charts_frame.grid_rowconfigure(0, weight=1)
+        self.charts_frame.grid_rowconfigure(1, weight=1) # New row for line chart
+
+        # --- Pie Chart (Top-Left) ---
+        self.pie_chart_frame = ctk.CTkFrame(self.charts_frame)
+        self.pie_chart_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+        
+        plt.style.use('dark_background')
+        self.fig_pie, self.ax_pie = plt.subplots(figsize=(5, 4))
+        chart_bg_color = "#2a2d2e" # Matched to Treeview background
+        self.fig_pie.patch.set_facecolor(chart_bg_color)
+        self.ax_pie.set_facecolor(chart_bg_color)
+        
+        self.ax_pie.text(0.5, 0.5, "No data to display", horizontalalignment='center', verticalalignment='center', transform=self.ax_pie.transAxes, color='gray', fontsize=12)
+
+        self.pie_chart_canvas = FigureCanvasTkAgg(self.fig_pie, master=self.pie_chart_frame)
+        self.pie_chart_canvas.get_tk_widget().pack(side=ctk.TOP, fill=ctk.BOTH, expand=True)
+        self.pie_chart_canvas.draw()
+        
+        # --- Bar Chart (Right) ---
+        self.bar_chart_frame = ctk.CTkFrame(self.charts_frame)
+        self.bar_chart_frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+        
+        self.fig_bar, self.ax_bar = plt.subplots(figsize=(5, 4))
+        self.fig_bar.patch.set_facecolor(chart_bg_color)
+        self.ax_bar.set_facecolor(chart_bg_color)
+        
+        self.ax_bar.text(0.5, 0.5, "No data to display", horizontalalignment='center', verticalalignment='center', transform=self.ax_bar.transAxes, color='gray', fontsize=12)
+        self.ax_bar.spines['top'].set_visible(False)
+        self.ax_bar.spines['right'].set_visible(False)
+        self.ax_bar.spines['left'].set_color('gray')
+        self.ax_bar.spines['bottom'].set_color('gray')
+
+        self.bar_chart_canvas = FigureCanvasTkAgg(self.fig_bar, master=self.bar_chart_frame)
+        self.bar_chart_canvas.get_tk_widget().pack(side=ctk.TOP, fill=ctk.BOTH, expand=True)
+        self.bar_chart_canvas.draw()
+        
+        # --- Line Chart (Bottom, spanning both columns) ---
+        self.line_chart_frame = ctk.CTkFrame(self.charts_frame)
+        self.line_chart_frame.grid(row=1, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
+        
+        self.fig_line, self.ax_line = plt.subplots(figsize=(10, 4))
+        self.fig_line.patch.set_facecolor(chart_bg_color)
+        self.ax_line.set_facecolor(chart_bg_color)
+        
+        self.ax_line.text(0.5, 0.5, "No data to display", horizontalalignment='center', verticalalignment='center', transform=self.ax_line.transAxes, color='gray', fontsize=12)
+        self.ax_line.spines['top'].set_visible(False)
+        self.ax_line.spines['right'].set_visible(False)
+        self.ax_line.spines['left'].set_color('gray')
+        self.ax_line.spines['bottom'].set_color('gray')
+
+        self.line_chart_canvas = FigureCanvasTkAgg(self.fig_line, master=self.line_chart_frame)
+        self.line_chart_canvas.get_tk_widget().pack(side=ctk.TOP, fill=ctk.BOTH, expand=True)
+        self.line_chart_canvas.draw()
+        
+        # --- 6. NEW: Budget Tab ---
+        self.budget_tab.grid_columnconfigure(0, weight=1)
+        self.budget_tab.grid_rowconfigure(0, weight=1)
+        
+        self.budget_scroll_frame = ctk.CTkScrollableFrame(self.budget_tab, label_text="Current Month's Budget Progress",
+                                                          label_font=ctk.CTkFont(size=16, weight="bold"))
+        self.budget_scroll_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+        self.budget_scroll_frame.grid_columnconfigure(0, weight=1)
+        
+        self.budget_progress_frames = {} # To hold widgets
+        
+        # --- Status Bar ---
+        self.status_label = ctk.CTkLabel(self, text="Welcome! Database initialized.", anchor="w", font=ctk.CTkFont(size=12))
+        self.status_label.grid(row=1, column=0, columnspan=2, padx=20, pady=5, sticky="ew")
+
+        # --- Initial Load ---
+        self.load_expenses() # This will populate all tabs, including budget
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    # --- Category Management ---
+    
+    def load_categories_from_db(self):
+        """Loads categories from DB into self.categories."""
+        try:
+            self.cursor.execute("SELECT name FROM categories ORDER BY name")
+            self.categories = [row[0] for row in self.cursor.fetchall()]
+        except sqlite3.Error as e:
+            self.update_status(f"Error loading categories: {e}", "red")
+            self.categories = ['Other'] # Fallback
+            
+    def update_all_category_menus(self):
+        """Updates all category OptionMenu widgets with self.categories."""
+        self.add_category_menu.configure(values=self.categories)
+        self.budget_cat_menu.configure(values=self.categories) # <-- FIX
+        
+        if self.categories:
+            self.add_category_menu.set(self.categories[0])
+            self.budget_cat_menu.set(self.categories[0]) # <-- FIX
+            
+        self.filter_cat_menu.configure(values=["All Categories"] + self.categories)
+        
+        self.edit_category_menu.configure(values=self.categories)
+        if self.categories:
+            self.edit_category_menu.set(self.categories[0])
+            
+        self.delete_cat_menu.configure(values=self.categories)
+        if self.categories:
+            self.delete_cat_menu.set(self.categories[0])
+
+    def add_category(self):
+        """Adds a new category to the database."""
+        new_cat = self.new_cat_entry.get().strip()
+        if not new_cat:
+            self.update_status("Category name cannot be empty.", "yellow")
+            return
+        if new_cat in self.categories:
+            self.update_status("Category already exists.", "yellow")
+            return
+            
+        try:
+            self.cursor.execute("INSERT INTO categories (name) VALUES (?)", (new_cat,))
+            self.conn.commit()
+            self.new_cat_entry.delete(0, 'end')
+            self.load_categories_from_db() # Refresh list
+            self.update_all_category_menus() # Update UI
+            self.update_status(f"Category '{new_cat}' added.", "green")
+            self.update_budget_tab() # <-- ADDED: Refresh budget tab
+        except sqlite3.Error as e:
+            self.update_status(f"Error adding category: {e}", "red")
+
+    def delete_category(self):
+        """Deletes a category from the database."""
+        cat_to_delete = self.delete_cat_menu.get()
+        if len(self.categories) <= 1:
+            self.update_status("Cannot delete the last category.", "yellow")
+            return
+            
+        # Check if category is in use
+        try:
+            self.cursor.execute("SELECT COUNT(*) FROM expenses WHERE category = ?", (cat_to_delete,))
+            count = self.cursor.fetchone()[0]
+            if count > 0:
+                if not askyesno("Confirm Deletion", f"Category '{cat_to_delete}' is used by {count} expense(s). Are you sure you want to delete it? This will NOT delete the expenses."):
+                    return
+            
+            # Also delete from budgets
+            self.cursor.execute("DELETE FROM budgets WHERE category = ?", (cat_to_delete,))
+            self.cursor.execute("DELETE FROM categories WHERE name = ?", (cat_to_delete,))
+            self.conn.commit()
+            self.load_categories_from_db()
+            self.update_all_category_menus()
+            self.update_status(f"Category '{cat_to_delete}' deleted.", "green")
+            self.update_budget_tab() # Refresh budget tab
+            
+        except sqlite3.Error as e:
+            self.update_status(f"Error deleting category: {e}", "red")
+
+    # --- Core Logic Functions ---
+
+    def set_add_date_today(self):
+        """Sets the add_date_entry to today's date."""
+        self._set_date_entry(self.add_date_entry, datetime.now().strftime('%Y-%m-%d'))
+
+    def add_expense(self):
+        """Adds a new expense to the database."""
+        date = self.add_date_entry.get()
+        category = self.add_category_menu.get()
+        description = self.add_description_entry.get()
+
+        try:
+            amount = float(self.add_amount_entry.get())
+        except ValueError:
+            self.update_status("Error: Amount must be a valid number.", "red")
+            return
+
+        try:
+            # Date validation is still good to have, even with picker
+            datetime.strptime(date, '%Y-%m-%d')
+        except ValueError:
+            self.update_status("Error: Date must be in YYYY-MM-DD format.", "red")
+            return
+
+        if not description:
+            description = "N/A"
+            
+        try:
+            self.cursor.execute("INSERT INTO expenses (date, category, amount, description) VALUES (?, ?, ?, ?)",
+                                (date, category, amount, description))
+            self.conn.commit()
+            
+            self.add_amount_entry.delete(0, 'end')
+            self.add_description_entry.delete(0, 'end')
+            self.set_add_date_today() # This will correctly set the date
+            self.add_category_menu.set(self.categories[0])
+            
+            self.update_status("Expense added successfully.", "green")
+            self.load_expenses() # This will now trigger budget update
+            self.left_tab_view.set("➕ Add Expense") # Stay on add tab
+        except sqlite3.Error as e:
+            self.update_status(f"Database Error: {e}", "red")
+
+    def load_expenses(self):
+        """Loads expenses from the DB into the treeview, applying filters."""
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        query = "SELECT * FROM expenses"
+        params = []
+        
+        filter_cat = self.filter_cat_menu.get()
+        start_date = self.start_date_entry.get()
+        end_date = self.end_date_entry.get()
+        
+        conditions = []
+        if filter_cat != "All Categories":
+            conditions.append("category = ?")
+            params.append(filter_cat)
+            
+        try:
+            if start_date:
+                datetime.strptime(start_date, '%Y-%m-%d')
+                conditions.append("date >= ?")
+                params.append(start_date)
+            if end_date:
+                datetime.strptime(end_date, '%Y-%m-%d')
+                conditions.append("date <= ?")
+                params.append(end_date)
+        except ValueError:
+             # This error shouldn't happen with the picker, but good to keep
+            self.update_status("Error: Invalid filter date format (use YYYY-MM-DD).", "red")
+            return
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        
+        query += " ORDER BY date DESC"
+
+        try:
+            self.cursor.execute(query, tuple(params))
+            rows = self.cursor.fetchall()
+            
+            total_expenses = 0
+            category_totals = defaultdict(float)
+            highest_expense = None
+            
+            for row in rows:
+                self.tree.insert("", "end", values=row)
+                amount = row[3]
+                description = row[4]
+                category = row[2]
+                
+                total_expenses += amount
+                category_totals[category] += amount
+                
+                if highest_expense is None or amount > highest_expense[1]:
+                    highest_expense = (description, amount)
+
+            transaction_count = len(rows)
+            average_expense = total_expenses / transaction_count if transaction_count > 0 else 0
+
+            # Update all dashboard elements
+            self.update_dashboard_summaries(total_expenses, transaction_count, average_expense, highest_expense)
+            self.update_pie_chart(category_totals)
+            self.update_bar_chart(category_totals)
+            self.update_line_chart(rows) # Pass the filtered rows
+            self.update_budget_tab() # <-- REFRESH BUDGET TAB
+            
+            self.clear_edit_form() # Clear edit form on reload
+            
+            if not start_date and not end_date and filter_cat == "All Categories":
+                self.update_status(f"Loaded {len(rows)} total expenses.", "white")
+            else:
+                self.update_status(f"Filter applied. Found {len(rows)} expenses.", "white")
+
+        except sqlite3.Error as e:
+            self.update_status(f"Database Error: {e}", "red")
+
+    def on_tree_select(self, event):
+        """Callback when a tree item is selected. Loads item into edit form."""
+        selected_item = self.tree.focus()
+        if not selected_item:
+            return
+            
+        item_values = self.tree.item(selected_item, 'values')
+        self.load_selected_for_edit(item_values)
+        
+        # --- ADDED ---
+        # Automatically switch to the edit tab
+        self.filter_edit_segmented_button.set("✏️ Edit")
+        self._switch_filter_edit_frame("✏️ Edit")
+
+    def load_selected_for_edit(self, values):
+        """Populates the edit form with values from the selected expense."""
+        self.clear_edit_form()
+        
+        self.selected_expense_id = values[0]
+        self._set_date_entry(self.edit_date_entry, values[1])
+        
+        if values[2] in self.categories:
+            self.edit_category_menu.set(values[2])
+        else:
+            # Handle case where category was deleted but expenses remain
+            self.edit_category_menu.set(self.categories[0]) # Set to default
+            self.update_status(f"Warning: Category '{values[2]}' no longer exists.", "yellow")
+
+        self.edit_amount_entry.insert(0, values[3])
+        self.edit_description_entry.insert(0, values[4])
+        
+        self.edit_info_label.configure(text=f"Editing Expense ID: {self.selected_expense_id}")
+        self.left_tab_view.set("🔍 Filter & Edit") # Switch to main tab
+        self.edit_amount_entry.focus() # Focus amount, since date is picker
+
+
+    def update_expense(self):
+        """Saves changes to an existing expense."""
+        if self.selected_expense_id is None:
+            self.update_status("No expense selected to update.", "yellow")
+            return
+
+        date = self.edit_date_entry.get()
+        category = self.edit_category_menu.get()
+        description = self.edit_description_entry.get()
+
+        try:
+            amount = float(self.edit_amount_entry.get())
+        except ValueError:
+            self.update_status("Error: Amount must be a valid number.", "red")
+            return
+        try:
+            datetime.strptime(date, '%Y-%m-%d')
+        except ValueError:
+            self.update_status("Error: Date must be in YYYY-MM-DD format.", "red")
+            return
+
+        if not description:
+            description = "N/A"
+
+        try:
+            self.cursor.execute("""
+                UPDATE expenses
+                SET date = ?, category = ?, amount = ?, description = ?
+                WHERE id = ?
+            """, (date, category, amount, description, self.selected_expense_id))
+            self.conn.commit()
+            
+            self.update_status(f"Expense ID {self.selected_expense_id} updated.", "green")
+            self.load_expenses() # Refreshes tree and clears edit form
+        except sqlite3.Error as e:
+            self.update_status(f"Database Error: {e}", "red")
+
+    def clear_edit_form(self):
+        """Clears all fields in the edit form."""
+        self.selected_expense_id = None
+        self._set_date_entry(self.edit_date_entry, "")
+        self.edit_amount_entry.delete(0, 'end')
+        self.edit_description_entry.delete(0, 'end')
+        if self.categories:
+            self.edit_category_menu.set(self.categories[0])
+        self.edit_info_label.configure(text="Select an item from the list to edit")
+
+    def delete_expense(self):
+        """Deletes the selected expense (from edit form or tree)."""
+        if self.selected_expense_id is None:
+            # Check tree focus as a fallback
+            selected_item = self.tree.focus()
+            if not selected_item:
+                self.update_status("Please select an expense to delete.", "yellow")
+                return
+            item_values = self.tree.item(selected_item, 'values')
+            self.selected_expense_id = item_values[0]
+
+        if not askyesno("Confirm Delete", f"Are you sure you want to permanently delete expense ID {self.selected_expense_id}?"):
+            return
+            
+        try:
+            self.cursor.execute("DELETE FROM expenses WHERE id = ?", (self.selected_expense_id,))
+            self.conn.commit()
+            
+            self.update_status(f"Deleted expense ID: {self.selected_expense_id}", "green")
+            self.load_expenses() # Refreshes tree and clears edit form
+        except sqlite3.Error as e:
+            self.update_status(f"Database Error: {e}", "red")
+
+    def clear_filters(self):
+        """Resets all filter fields and reloads expenses."""
+        self.filter_cat_menu.set("All Categories")
+        self._set_date_entry(self.start_date_entry, "")
+        self._set_date_entry(self.end_date_entry, "")
+        self.update_status("Filters cleared.", "white")
+        self.load_expenses()
+
+    # --- AI-Powered Functions ---
+
+    def suggest_category(self):
+        """Suggests a category based on keywords in the description entry."""
+        description = self.add_description_entry.get().lower()
+        if not description:
+            self.update_status("Please enter a description to get a suggestion.", "yellow")
+            return
+            
+        # Extract simple words
+        words = re.findall(r'\b\w+\b', description)
+        if not words:
+            self.update_status("No keywords found in description.", "yellow")
+            return
+
+        try:
+            # Find the most common category for these keywords
+            # This is a simple but effective "AI" feature
+            possible_categories = []
+            for word in set(words):
+                like_pattern = f"%{word}%"
+                self.cursor.execute("""
+                    SELECT category, COUNT(*) as count
+                    FROM expenses
+                    WHERE description LIKE ?
+                    GROUP BY category
+                    ORDER BY count DESC
+                """, (like_pattern,))
+                results = self.cursor.fetchall()
+                for cat, count in results:
+                    possible_categories.extend([cat] * count) # Weight by count
+            
+            if not possible_categories:
+                self.update_status("No past data found for these keywords.", "white")
+                return
+
+            # Find the most common category from all weighted results
+            most_common_cat = Counter(possible_categories).most_common(1)[0][0]
+            
+            if most_common_cat in self.categories:
+                self.add_category_menu.set(most_common_cat)
+                self.update_status(f"Suggested category: '{most_common_cat}'", "green")
+            else:
+                self.update_status(f"Found past category '{most_common_cat}', but it's been deleted.", "yellow")
+
+        except sqlite3.Error as e:
+            self.update_status(f"Database error during suggestion: {e}", "red")
+
+    def _calculate_linear_regression(self, x, y):
+        """Helper to calculate slope (m) and intercept (b) for linear regression."""
+        n = len(x)
+        if n == 0:
+            return 0, 0
+            
+        mean_x = sum(x) / n
+        mean_y = sum(y) / n
+        
+        numerator = sum((x[i] - mean_x) * (y[i] - mean_y) for i in range(n))
+        denominator = sum((x[i] - mean_x) ** 2 for i in range(n))
+        
+        if denominator == 0:
+            return 0, mean_y  # Cannot calculate slope, return average
+            
+        m = numerator / denominator
+        b = mean_y - (m * mean_x)
+        
+        return m, b
+
+    def predict_spending(self):
+        """Predicts next month's spending using linear regression."""
+        try:
+            self.cursor.execute("SELECT date, amount FROM expenses ORDER BY date ASC")
+            all_expenses = self.cursor.fetchall()
+            
+            if not all_expenses:
+                self.prediction_result_label.configure(text="No data to predict.", text_color="gray")
+                return
+
+            # Aggregate data by month
+            monthly_totals = defaultdict(float)
+            for date_str, amount in all_expenses:
+                month_key = datetime.strptime(date_str, '%Y-%m').strftime('%Y-%m')
+                monthly_totals[month_key] += amount
+
+            if len(monthly_totals) < 3:
+                self.prediction_result_label.configure(text=f"Need at least 3 months\nof data to predict.", text_color="yellow")
+                return
+
+            sorted_months = sorted(monthly_totals.keys())
+            
+            x_values = list(range(len(sorted_months))) # 0, 1, 2, ...
+            y_values = [monthly_totals[month] for month in sorted_months]
+            
+            m, b = self._calculate_linear_regression(x_values, y_values)
+            
+            # Predict next value (index n)
+            next_x = len(x_values)
+            prediction = (m * next_x) + b
+            
+            if prediction < 0:
+                prediction = sum(y_values) / len(y_values) # Fallback to average if prediction is negative
+                self.prediction_result_label.configure(text=f"Trend is decreasing.\nNext month approx: Rs. {prediction:,.2f}\n(Based on average)", text_color="#FFA07A")
+            else:
+                self.prediction_result_label.configure(text=f"Prediction: Rs. {prediction:,.2f}", text_color="#3484F0")
+
+        except sqlite3.Error as e:
+            self.update_status(f"Database error during prediction: {e}", "red")
+        except Exception as e:
+             self.update_status(f"Error during prediction: {e}", "red")
+
+    # --- NEW: Budget & Report Functions ---
+    
+    def set_budget(self):
+        """Saves or updates a budget amount for a category."""
+        category = self.budget_cat_menu.get()
+        try:
+            amount = float(self.budget_amount_entry.get())
+        except ValueError:
+            self.update_status("Error: Budget must be a valid number.", "red")
+            return
+            
+        if amount < 0:
+            self.update_status("Error: Budget must be a positive number.", "red")
+            return
+
+        try:
+            # Use INSERT OR REPLACE (UPSERT)
+            self.cursor.execute("INSERT OR REPLACE INTO budgets (category, amount) VALUES (?, ?)", (category, amount))
+            self.conn.commit()
+            self.budget_amount_entry.delete(0, 'end')
+            self.update_status(f"Budget for '{category}' set to Rs. {amount:,.2f}", "green")
+            self.update_budget_tab() # Refresh budget tab
+        except sqlite3.Error as e:
+            self.update_status(f"Database error setting budget: {e}", "red")
+            
+    def update_budget_tab(self):
+        """Fetches current month's spending and budgets, and populates the budget tab."""
+        # 1. Clear existing widgets
+        for frame in self.budget_progress_frames.values():
+            frame.destroy()
+        self.budget_progress_frames = {}
+        
+        try:
+            # 2. Get budgets
+            self.cursor.execute("SELECT category, amount FROM budgets")
+            budgets = dict(self.cursor.fetchall())
+            
+            # 3. Get current month's spending by category
+            current_month = datetime.now().strftime('%Y-%m')
+            self.cursor.execute("""
+                SELECT category, SUM(amount)
+                FROM expenses
+                WHERE strftime('%Y-%m', date) = ?
+                GROUP BY category
+            """, (current_month,))
+            
+            spending = dict(self.cursor.fetchall())
+            
+            # 4. Combine all categories (from budgets, spending, and all categories list)
+            all_cats_with_activity = set(self.categories) | set(budgets.keys()) | set(spending.keys())
+            
+            if not all_cats_with_activity:
+                no_data_label = ctk.CTkLabel(self.budget_scroll_frame, text="No budget or spending data for this month.",
+                                             font=ctk.CTkFont(size=14, slant="italic"), text_color="gray")
+                no_data_label.grid(row=0, column=0, padx=10, pady=20)
+                self.budget_progress_frames['no_data'] = no_data_label # Store to clear later
+                return
+
+            # 5. Create widgets for each category
+            row_index = 0
+            for category in sorted(list(all_cats_with_activity)):
+                if category not in self.categories:
+                    continue # Skip deleted categories that might still have budgets
+                
+                spent = spending.get(category, 0)
+                budget = budgets.get(category, 0)
+                
+                if budget == 0 and spent == 0:
+                    continue # Skip categories with no activity or budget
+                
+                # Create a frame for this category
+                cat_frame = ctk.CTkFrame(self.budget_scroll_frame)
+                cat_frame.grid(row=row_index, column=0, padx=10, pady=10, sticky="ew")
+                cat_frame.grid_columnconfigure(0, weight=1)
+                self.budget_progress_frames[category] = cat_frame
+                
+                # Title
+                title_label = ctk.CTkLabel(cat_frame, text=category, font=ctk.CTkFont(size=16, weight="bold"))
+                title_label.grid(row=0, column=0, padx=15, pady=(10, 0), sticky="w")
+                
+                # Progress Bar
+                progress_bar = ctk.CTkProgressBar(cat_frame, height=20, corner_radius=10)
+                progress_bar.grid(row=1, column=0, columnspan=2, padx=15, pady=5, sticky="ew")
+                
+                # Labels (Spent vs Budget)
+                spent_label = ctk.CTkLabel(cat_frame, text=f"Rs. {spent:,.2f}", font=ctk.CTkFont(size=14, weight="bold"))
+                spent_label.grid(row=2, column=0, padx=15, pady=(0, 10), sticky="w")
+                
+                budget_label_text = f"Budget: Rs. {budget:,.2f}" if budget > 0 else "No Budget Set"
+                budget_label = ctk.CTkLabel(cat_frame, text=budget_label_text, font=ctk.CTkFont(size=14), text_color="gray")
+                budget_label.grid(row=2, column=1, padx=15, pady=(0, 10), sticky="e")
+                
+                # Set progress bar value and color
+                if budget > 0:
+                    percentage = spent / budget
+                    if percentage > 1:
+                        percentage = 1
+                    
+                    progress_bar.set(percentage)
+                    
+                    if percentage >= 1:
+                        progress_bar.configure(progress_color="#D32F2F") # Red
+                        spent_label.configure(text_color="#F44336")
+                    elif percentage > 0.8:
+                        progress_bar.configure(progress_color="#FFEB3B") # Yellow
+                        spent_label.configure(text_color="#FFEB3B")
+                    else:
+                        progress_bar.configure(progress_color="#4CAF50") # Green
+                        spent_label.configure(text_color="white")
+                else:
+                    progress_bar.set(0) # No budget, no progress
+                    spent_label.configure(text_color="white")
+
+                row_index += 1
+                
+        except sqlite3.Error as e:
+            self.update_status(f"Error loading budgets: {e}", "red")
+
+    def export_to_csv(self):
+        """Exports the current Treeview contents to a CSV file."""
+        try:
+            # Ask user for file name
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+                title="Save Expenses as CSV"
+            )
+            
+            if not file_path:
+                self.update_status("Export cancelled.", "white")
+                return
+
+            with open(file_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                
+                # Write header
+                headers = [self.tree.heading(col, "text") for col in self.tree["columns"]]
+                writer.writerow(headers)
+                
+                # Write data
+                for item_id in self.tree.get_children():
+                    values = self.tree.item(item_id, 'values')
+                    writer.writerow(values)
+                    
+            self.update_status(f"Expenses exported to {file_path}", "green")
+            
+        except Exception as e:
+            self.update_status(f"Error exporting to CSV: {e}", "red")
+
+    def generate_monthly_report(self):
+        """Generates a pop-up report for the selected month and year."""
+        month = self.month_menu.get()
+        year = self.year_menu.get()
+        month_year = f"{year}-{month}"
+        
+        try:
+            # 1. Get spending for that month
+            self.cursor.execute("""
+                SELECT category, SUM(amount)
+                FROM expenses
+                WHERE strftime('%Y-%m', date) = ?
+                GROUP BY category
+            """, (month_year,))
+            spending = self.cursor.fetchall()
+            
+            if not spending:
+                showinfo("Monthly Report", f"No expenses found for {month_year}.")
+                return
+
+            # 2. Get total transactions
+            self.cursor.execute("""
+                SELECT COUNT(*), SUM(amount)
+                FROM expenses
+                WHERE strftime('%Y-%m', date) = ?
+            """, (month_year,))
+            count, total_spent = self.cursor.fetchone()
+            
+            # 3. Find top category
+            top_category = sorted(spending, key=lambda x: x[1], reverse=True)[0]
+            
+            avg_spent = total_spent / count if count > 0 else 0
+            
+            # 4. Create Toplevel report window
+            report_window = ctk.CTkToplevel(self)
+            report_window.title(f"Report for {month_year}")
+            report_window.geometry("450x300")
+            report_window.transient(self)
+            report_window.grab_set()
+            
+            report_window.grid_columnconfigure(0, weight=1)
+            
+            title = ctk.CTkLabel(report_window, text=f"Summary for {month_year}", font=ctk.CTkFont(size=20, weight="bold"))
+            title.grid(row=0, column=0, padx=20, pady=20)
+            
+            frame = ctk.CTkFrame(report_window)
+            frame.grid(row=1, column=0, padx=20, pady=10, sticky="nsew")
+            frame.grid_columnconfigure(1, weight=1)
+
+            def add_row(r, label, value):
+                lab = ctk.CTkLabel(frame, text=label, font=ctk.CTkFont(size=14, weight="bold"))
+                lab.grid(row=r, column=0, padx=15, pady=10, sticky="w")
+                val = ctk.CTkLabel(frame, text=value, font=ctk.CTkFont(size=14))
+                val.grid(row=r, column=1, padx=15, pady=10, sticky="e")
+
+            add_row(0, "Total Spent:", f"Rs. {total_spent:,.2f}")
+            add_row(1, "Total Transactions:", f"{count}")
+            add_row(2, "Average Spending:", f"Rs. {avg_spent:,.2f}")
+            add_row(3, "Top Category:", f"{top_category[0]} (Rs. {top_category[1]:,.2f})")
+            
+            close_button = ctk.CTkButton(report_window, text="Close", command=report_window.destroy)
+            close_button.grid(row=2, column=0, padx=20, pady=20)
+            
+        except sqlite3.Error as e:
+            self.update_status(f"Database error generating report: {e}", "red")
+
+    # --- UI Update Functions ---
+
+    def update_dashboard_summaries(self, total, count, avg, high):
+        """Updates all the KPI cards in the dashboard."""
+        self.kpi_total_label.configure(text=f"Rs. {total:,.2f}")
+        self.kpi_count_label.configure(text=f"{count}")
+        self.kpi_avg_label.configure(text=f"Rs. {avg:,.2f}")
+        
+        if high and high[1] > 0:
+            # Truncate long descriptions
+            desc = high[0]
+            if len(desc) > 20:
+                desc = desc[:18] + "..."
+            self.kpi_high_label.configure(text=f"Rs. {high[1]:,.2f}\n({desc})")
+        else:
+            self.kpi_high_label.configure(text="Rs. 0.00\n(N/A)")
+
+
+    def update_pie_chart(self, category_totals):
+        """Updates the pie chart with new category data."""
+        self.ax_pie.clear()
+
+        if not category_totals:
+            self.ax_pie.text(0.5, 0.5, "No data to display", horizontalalignment='center', verticalalignment='center', transform=self.ax_pie.transAxes, color='gray', fontsize=12)
+            self.pie_chart_canvas.draw()
+            return
+            
+        labels = category_totals.keys()
+        sizes = category_totals.values()
+        
+        explode = [0] * len(labels)
+        if sizes:
+            max_index = list(sizes).index(max(sizes))
+            explode[max_index] = 0.1
+
+        textprops = {'color': 'w', 'fontsize': 9, 'weight': 'bold'}
+        
+        wedges, texts, autotexts = self.ax_pie.pie(
+            sizes, explode=explode, labels=labels, autopct='%1.1f%%',
+            shadow=True, startangle=140, textprops=textprops, pctdistance=0.85,
+            colors=[self.PIE_COLORS[i % len(self.PIE_COLORS)] for i in range(len(labels))] # Apply custom colors
+        )
+        
+        for text in texts:
+            text.set_color('white')
+        for autotext in autotexts:
+            autotext.set_color('black')
+            
+        self.ax_pie.axis('equal')
+        self.ax_pie.set_title("Spending by Category", color='white', fontsize=14, weight='bold')
+        self.pie_chart_canvas.draw()
+
+    def update_bar_chart(self, category_totals):
+        """Updates the new horizontal bar chart with top 5 categories."""
+        self.ax_bar.clear()
+        
+        if not category_totals:
+            self.ax_bar.text(0.5, 0.5, "No data to display", horizontalalignment='center', verticalalignment='center', transform=self.ax_bar.transAxes, color='gray', fontsize=12)
+            self.bar_chart_canvas.draw()
+            return
+
+        # Sort categories by amount, get top 5
+        sorted_categories = sorted(category_totals.items(), key=lambda item: item[1], reverse=True)
+        top_5 = sorted_categories[:5]
+        top_5.reverse() # Reverse for plotting (highest at top)
+        
+        if not top_5:
+             self.ax_bar.text(0.5, 0.5, "No data to display", horizontalalignment='center', verticalalignment='center', transform=self.ax_bar.transAxes, color='gray', fontsize=12)
+             self.bar_chart_canvas.draw()
+             return
+
+        labels = [item[0] for item in top_5]
+        values = [item[1] for item in top_5]
+        
+        colors = [self.PIE_COLORS[i % len(self.PIE_COLORS)] for i in range(len(labels))]
+
+        bars = self.ax_bar.barh(labels, values, color=colors, height=0.6)
+        
+        # Style the chart
+        self.ax_bar.set_title("Top 5 Categories", color='white', fontsize=14, weight='bold')
+        self.ax_bar.set_xlabel("Amount (Rs.)", color='gray')
+        self.ax_bar.tick_params(axis='y', colors='white', labelsize=10)
+        self.ax_bar.tick_params(axis='x', colors='white')
+        
+        # Remove spines
+        self.ax_bar.spines['top'].set_visible(False)
+        self.ax_bar.spines['right'].set_visible(False)
+        self.ax_bar.spines['left'].set_color('gray')
+        self.ax_bar.spines['bottom'].set_color('gray')
+        
+        # Add value labels
+        self.ax_bar.bar_label(bars, fmt='Rs. %.2f', padding=3, color='white', fontsize=9)
+        
+        self.fig_bar.tight_layout(pad=2.0)
+        self.bar_chart_canvas.draw()
+
+    def update_line_chart(self, expenses_rows):
+        """Updates the new line chart with spending over time."""
+        self.ax_line.clear()
+        
+        if not expenses_rows:
+            self.ax_line.text(0.5, 0.5, "No data to display", horizontalalignment='center', verticalalignment='center', transform=self.ax_line.transAxes, color='gray', fontsize=12)
+            self.line_chart_canvas.draw()
+            return
+            
+        # Aggregate data by date
+        daily_totals = defaultdict(float)
+        for row in expenses_rows:
+            date_str = row[1]
+            amount = row[3]
+            try:
+                date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+                daily_totals[date_obj] += amount
+            except ValueError:
+                continue # Skip bad date
+                
+        if not daily_totals:
+            self.ax_line.text(0.5, 0.5, "No data to display", horizontalalignment='center', verticalalignment='center', transform=self.ax_line.transAxes, color='gray', fontsize=12)
+            self.line_chart_canvas.draw()
+            return
+
+        sorted_dates = sorted(daily_totals.keys())
+        values = [daily_totals[date] for date in sorted_dates]
+        
+        # Plot the data
+        self.ax_line.plot(sorted_dates, values, marker='o', linestyle='-', color=self.PIE_COLORS[1], markersize=4)
+        self.ax_line.fill_between(sorted_dates, values, color=self.PIE_COLORS[1], alpha=0.3)
+        
+        # Style the chart
+        self.ax_line.set_title("Spending Over Time", color='white', fontsize=14, weight='bold')
+        self.ax_line.set_ylabel("Amount (Rs.)", color='gray')
+        
+        # Format X-axis dates
+        self.ax_line.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        self.ax_line.tick_params(axis='y', colors='white')
+        self.ax_line.tick_params(axis='x', colors='white', rotation=30, labelsize=8)
+        
+        self.ax_line.spines['top'].set_visible(False)
+        self.ax_line.spines['right'].set_visible(False)
+        self.ax_line.spines['left'].set_color('gray')
+        self.ax_line.spines['bottom'].set_color('gray')
+        
+        self.ax_line.grid(axis='y', linestyle='--', alpha=0.3, color='gray')
+        
+        self.fig_line.tight_layout(pad=2.0)
+        self.line_chart_canvas.draw()
+
+
+    def update_status(self, message, color="white"):
+        """Updates the text and color of the status bar."""
+        colors = {"red": "#F44336", "green": "#4CAF50", "yellow": "#FFEB3B", "white": "white"}
+        self.status_label.configure(text=message, text_color=colors.get(color, "white"))
+
+    def on_closing(self):
+        """Handles the window closing event."""
+        if self.conn:
+            self.conn.commit()
+            self.conn.close()
+        self.destroy()
+
+    # --- New UI/UX Helper Functions ---
+
+    def _set_date_entry(self, entry_widget, date_str):
+        """Helper to set text in a readonly date entry."""
+        entry_widget.configure(state='normal')
+        entry_widget.delete(0, 'end')
+        entry_widget.insert(0, date_str)
+        entry_widget.configure(state='readonly')
+
+    def _pick_date(self, entry_widget):
+        """Opens a Toplevel window with a Calendar widget."""
+        cal_window = ctk.CTkToplevel(self)
+        cal_window.title("Select Date")
+        cal_window.geometry("350x350")
+        cal_window.transient(self) # Keep on top
+        cal_window.grab_set() # Modal behavior
+
+        # Get current date from entry if available, else today
+        try:
+            current_date = datetime.strptime(entry_widget.get(), '%Y-%m-%d')
+        except ValueError:
+            current_date = datetime.now()
+
+        cal = Calendar(cal_window, selectmode='day', 
+                       year=current_date.year, 
+                       month=current_date.month, 
+                       day=current_date.day,
+                       background="#2a2d2e",
+                       foreground="white",
+                       headersbackground="#343638",
+                       normalbackground="#343638",
+                       normalforeground="white",
+                       weekendbackground="#343638",
+                       weekendforeground="white",
+                       othermonthbackground="#2a2d2e",
+                       othermonthforeground="gray",
+                       othermonthwebackground="#2a2d2e",
+                       othermonthweforeground="gray",
+                       selectbackground="#22559b",
+                       selectforeground="white",
+                       disabledbackground="#2a2d2e",
+                       disabledforeground="gray"
+                       )
+        cal.pack(pady=10, padx=10, fill="both", expand=True)
+
+        def on_select():
+            try:
+                date_str = cal.get_date()
+                # tkcalendar format is m/d/yy, convert to YYYY-MM-DD
+                date_obj = datetime.strptime(date_str, '%m/%d/%y')
+                formatted_date = date_obj.strftime('%Y-%m-%d')
+                
+                self._set_date_entry(entry_widget, formatted_date)
+                cal_window.destroy()
+            except Exception as e:
+                self.update_status(f"Error selecting date: {e}", "red")
+
+        select_button = ctk.CTkButton(cal_window, text="Select", command=on_select)
+        select_button.pack(pady=10, padx=10)
+
+    def _switch_filter_edit_frame(self, value):
+        """Shows and hides the Filter or Edit frames based on the segmented button."""
+        if value == "🔍 Filter":
+            self.edit_frame.grid_remove()
+            self.delete_button.grid_remove() # Hide delete button
+            self.filter_frame.grid(row=1, column=0, padx=0, pady=0, sticky="nsew")
+        elif value == "✏️ Edit":
+            self.filter_frame.grid_remove()
+            self.edit_frame.grid(row=1, column=0, padx=0, pady=0, sticky="nsew")
+            self.delete_button.grid(row=2, column=0, padx=10, pady=10, sticky="ew") # Show delete button
+
+    def _toggle_theme(self):
+        """Switches between light and dark mode."""
+        mode = self.theme_switch.get()
+        ctk.set_appearance_mode(mode)
+
+# --- Main execution ---
+if __name__ == "__main__":
+    init_db()
+    app = ExpenseTrackerApp()
+    app.mainloop()
+
