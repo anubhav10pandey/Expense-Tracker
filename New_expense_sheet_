@@ -1,0 +1,263 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+from datetime import datetime
+import os # Import os to check for file existence
+
+FILE_NAME = "expenses.csv.txt"
+
+# Initialize CSV if not exists
+if not os.path.exists(FILE_NAME):
+    df = pd.DataFrame(columns=["date", "category", "amount"])
+    df.to_csv(FILE_NAME, index=False)
+
+# Load data
+def load_data():
+    return pd.read_csv(FILE_NAME, parse_dates=['date'])
+
+# Save data
+def save_data(df):
+    df.to_csv(FILE_NAME, index=False)
+
+# Add expense
+def add_expense():
+    date = input("Enter date (YYYY-MM-DD) or leave blank for today: ")
+    if date == "":
+        date = datetime.today().strftime('%Y-%m-%d')
+    
+    category = input("Enter category: ")
+    
+    amount = 0
+    while True:
+        try:
+            amount = float(input("Enter amount: "))
+            break
+        except ValueError:
+            print("Invalid amount. Please enter a number.")
+            
+    df = load_data()
+    # Use pd.concat for appending
+    new_expense = pd.DataFrame([{ "date": date, "category": category, "amount": amount }])
+    df = pd.concat([df, new_expense], ignore_index=True)
+    
+    # Ensure date column is proper datetime before saving
+    df['date'] = pd.to_datetime(df['date'])
+    
+    save_data(df)
+    print("Expense added!")
+
+# Delete expense
+def delete_expense():
+    df = load_data()
+    if df.empty:
+        print("No expenses to delete.")
+        return
+    
+    # Show expenses grouped by day
+    # Make sure date column is datetime
+    df['date'] = pd.to_datetime(df['date'])
+    df['date_only'] = df['date'].dt.date
+    grouped = df.groupby('date_only')
+    
+    print("\nExpenses by Day:")
+    if grouped.groups:
+        for date, group in grouped:
+            print(f"\nDate: {date}")
+            # Sort group by original index to ensure consistent display
+            for idx, row in group.sort_index().iterrows():
+                print(f"  [{idx}] Category: {row['category']}, Amount: {row['amount']}")
+    else:
+        print("No expenses found.")
+        return
+
+    try:
+        idx = int(input("\nEnter index of expense to delete: "))
+        if idx in df.index:
+            df = df.drop(idx).reset_index(drop=True)
+            # Drop the temporary 'date_only' column before saving
+            df = df.drop(columns=['date_only'], errors='ignore')
+            save_data(df)
+            print("Expense deleted!")
+        else:
+            print("Invalid index!")
+    except ValueError:
+        print("Invalid input. Please enter a number.")
+
+# View expenses grouped by day
+def view_expenses():
+    df = load_data()
+    if df.empty:
+        print("No expenses recorded.")
+        return
+
+    print("\nFull Data from expenses.csv.txt:\n")
+    print(df)
+    
+    # Make sure date column is datetime
+    df['date'] = pd.to_datetime(df['date'])
+    df['date_only'] = df['date'].dt.date
+    grouped = df.groupby('date_only')
+
+    print("\nExpenses by Day:")
+    for date, group in grouped:
+        print(f"\nDate: {date}")
+        for idx, row in group.iterrows():
+            print(f"  [{idx}] Category: {row['category']}, Amount: {row['amount']}")
+        daily_total = group['amount'].sum()
+        print(f"  --> Daily Total: {daily_total:.2f}")
+
+    # Monthly summary
+    monthly_total = df.groupby(df['date'].dt.to_period('M'))['amount'].sum()
+    print("\nMonthly Total:\n", monthly_total)
+
+# Show graph
+def show_graph():
+    df = load_data()
+    if df.empty:
+        print("No data to plot!")
+        return
+    
+    choice = input("Graph by (daily/monthly/category): ").lower()
+    
+    # Make sure date column is datetime
+    df['date'] = pd.to_datetime(df['date'])
+    
+    if choice == "daily":
+        data = df.groupby(df['date'].dt.date)['amount'].sum()
+    elif choice == "monthly":
+        data = df.groupby(df['date'].dt.to_period('M'))['amount'].sum()
+        # Convert PeriodIndex to string for better plotting labels
+        data.index = data.index.to_series().astype(str)
+    elif choice == "category":
+        data = df.groupby('category')['amount'].sum()
+    else:
+        print("Invalid choice!")
+        return
+    
+    if data.empty:
+        print(f"No data to plot for '{choice}'.")
+        return
+        
+    data.plot(kind='bar', title=f'Expense {choice.capitalize()}')
+    plt.ylabel('Amount')
+    plt.xlabel(choice.capitalize())
+    plt.tight_layout() # Adjust plot to prevent labels from overlapping
+    plt.show()
+
+# Prediction using PyTorch and plot
+class ExpensePredictor(nn.Module):
+    def __init__(self):
+        super(ExpensePredictor, self).__init__()
+        self.fc = nn.Linear(1,1)  # Simple linear model (y = mx + b)
+
+    def forward(self, x):
+        return self.fc(x)
+
+def predict_expense():
+    df = load_data()
+    if df.empty:
+        print("No data for prediction!")
+        return
+    
+    # Prepare data: group by day
+    # Make sure date column is datetime
+    df['date'] = pd.to_datetime(df['date'])
+    df_sorted = df.groupby(df['date'].dt.date)['amount'].sum().reset_index()
+    
+    if len(df_sorted) < 2:
+        print("Not enough data (need at least 2 days) for prediction!")
+        return
+        
+    df_sorted['day_num'] = range(len(df_sorted))
+    x = torch.tensor(df_sorted['day_num'].values, dtype=torch.float32).view(-1,1)
+    y = torch.tensor(df_sorted['amount'].values, dtype=torch.float32).view(-1,1)
+    
+    # Simple linear regression model
+    model = ExpensePredictor()
+    criterion = nn.MSELoss()
+    
+    # === SOLUTION ===
+    # Using Adam optimizer can sometimes converge faster
+    # We increased the learning rate to 0.1
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.1) 
+    
+    # Train model
+    # We increased the epochs to 20,000
+    for epoch in range(20000): 
+    # === END SOLUTION ===
+        
+        optimizer.zero_grad()
+        outputs = model(x)
+        loss = criterion(outputs, y)
+        loss.backward()
+        optimizer.step()
+        
+        if (epoch+1) % 1000 == 0: # Print every 1000 epochs now
+            print(f'Epoch [{epoch+1}/20000], Loss: {loss.item():.4f}')
+    
+    # Predict next 7 days
+    future_days = 7
+    last_day_num = len(df_sorted) - 1
+    x_future = torch.tensor([[i] for i in range(last_day_num + 1, last_day_num + 1 + future_days)], dtype=torch.float32)
+    predicted = model(x_future).detach().numpy().flatten()
+    
+    # Get the actual last date from the data
+    last_date = pd.to_datetime(df_sorted['date'].iloc[-1])
+    
+    # Combine historical and predicted for plotting
+    all_days = list(df_sorted['date']) + [last_date + pd.Timedelta(days=i) for i in range(1, future_days+1)]
+    
+    # Get the line of best fit for historical data
+    with torch.no_grad():
+        historical_fit = model(x).numpy().flatten()
+    
+    # Plot
+    plt.figure(figsize=(10,5))
+    plt.plot(df_sorted['date'], df_sorted['amount'], 'o', label='Actual Expenses')
+    plt.plot(df_sorted['date'], historical_fit, 'b-', label='Linear Fit')
+    plt.plot(all_days[-future_days:], predicted, 'rx--', label='Predicted Expenses')
+    plt.title("Expense Prediction for Next 7 Days")
+    plt.xlabel("Date")
+    plt.ylabel("Amount")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+    
+    print("\nPredicted expenses for next 7 days:")
+    for i in range(future_days):
+        # Format the future date for printing
+        future_date_str = (last_date + pd.Timedelta(days=i+1)).strftime('%Y-%m-%d')
+        print(f"{future_date_str} : {predicted[i]:.2f}")
+
+# Main menu
+def main():
+    while True:
+        print("\n--- Personal Expense Tracker ---")
+        print("1. Add Expense")
+        print("2. Delete Expense")
+        print("3. View Expenses")
+        print("4. Show Graph")
+        print("5. Predict Next 7 Days Expense")
+        print("6. Exit")
+        choice = input("Enter choice (1-6): ")
+        
+        if choice == "1":
+            add_expense()
+        elif choice == "2":
+            delete_expense()
+        elif choice == "3":
+            view_expenses()
+        elif choice == "4":
+            show_graph()
+        elif choice == "5":
+            predict_expense()
+        elif choice == "6":
+            print("Exiting. Goodbye!")
+            break
+        else:
+            print("Invalid choice! Please enter a number between 1 and 6.")
+
+if __name__ == "__main__":
+    main()
